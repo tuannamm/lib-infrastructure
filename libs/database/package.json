@@ -1,0 +1,56 @@
+{
+  "name": "@lib-infrastructure/database",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "@org/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./contracts": {
+      "@org/source": "./src/lib/profiles/types.ts",
+      "types": "./dist/lib/profiles/types.d.ts",
+      "default": "./dist/lib/profiles/types.js"
+    }
+  },
+  "nx": {
+    "name": "database",
+    "targets": {
+      "test": {
+        "dependsOn": [
+          "build"
+        ],
+        "cache": false
+      },
+      "test:integration": {
+        "dependsOn": [
+          "build"
+        ],
+        "cache": false
+      }
+    }
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "scripts": {
+    "test": "node --test tests/unit.test.cjs",
+    "test:integration": "node --test tests/integration.test.cjs",
+    "lint": "oxlint src/ tests/"
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^12.4.0",
+    "@nestjs/core": "^12.4.0",
+    "@nestjs/mongoose": "^12.0.1",
+    "mongoose": "^9.12.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  }
+}

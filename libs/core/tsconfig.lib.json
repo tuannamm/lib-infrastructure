@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/tsconfig.lib.tsbuildinfo",
+    "emitDeclarationOnly": false,
+    "types": ["node"],
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "strictPropertyInitialization": false
+  },
+  "include": [
+    "src/index.ts",
+    "../health/src/**/*.ts",
+    "../service-discovery-client/src/**/*.ts"
+  ],
+  "exclude": [
+    "../health/src/**/*.spec.ts",
+    "../service-discovery-client/src/**/*.spec.ts"
+  ],
+  "references": [
+    {
+      "path": "../service-discovery-client/tsconfig.lib.json"
+    },
+    {
+      "path": "../health/tsconfig.lib.json"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "name": "@lib-infrastructure/rabbitmq",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "@org/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "nx": {
+    "name": "rabbitmq",
+    "targets": {
+      "test": {
+        "dependsOn": [
+          "build"
+        ],
+        "cache": false
+      },
+      "test:integration": {
+        "dependsOn": [
+          "build"
+        ],
+        "cache": false
+      }
+    }
+  },
+  "dependencies": {
+    "amqp-connection-manager": "^5.0.1",
+    "amqplib": "^2.2.1",
+    "tslib": "^2.3.0"
+  },
+  "scripts": {
+    "test": "node --test tests/unit.test.cjs",
+    "test:integration": "node --test tests/integration.test.cjs"
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^12.4.0",
+    "@nestjs/core": "^12.4.0",
+    "@nestjs/microservices": "^12.4.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  }
+}

@@ -1,0 +1,2 @@
+export const RAW_OPTIONS = Symbol('HEALTH_RAW_OPTIONS');
+export const RESOLVED_OPTIONS = Symbol('HEALTH_RESOLVED_OPTIONS');
