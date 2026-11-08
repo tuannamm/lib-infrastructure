@@ -10,11 +10,6 @@
       "@org/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./contracts": {
-      "@org/source": "./src/lib/profiles/types.ts",
-      "types": "./dist/lib/profiles/types.d.ts",
-      "default": "./dist/lib/profiles/types.js"
     }
   },
   "nx": {

@@ -163,50 +163,6 @@ test(
 );
 
 test(
-  'profile persistence module initializes indexes and exports a reusable repository',
-  { timeout: 15000 },
-  async () => {
-    const {
-      UserProfilePersistenceModule,
-      PROFILE_REPOSITORY,
-      DatabaseError,
-    } = require('../dist');
-    const app = await start([
-      DatabaseModule.forRoot({
-        uri,
-        dbName: `profiles_test_${randomUUID().replaceAll('-', '')}`,
-      }),
-      UserProfilePersistenceModule,
-    ]);
-    const connection = app.get(getConnectionToken());
-    const repository = app.get(PROFILE_REPOSITORY);
-    try {
-      const profiles = await Promise.all(
-        Array.from({ length: 20 }, () => repository.getOrCreate('alice')),
-      );
-      assert.ok(
-        profiles.every(
-          (profile) => profile.userId === 'alice' && !('_id' in profile),
-        ),
-      );
-      assert.equal(
-        await connection.collection('user_profiles').countDocuments(),
-        1,
-      );
-      await repository.update('alice', {
-        locale: 'vi',
-        timezone: 'Asia/Ho_Chi_Minh',
-      });
-      assert.equal((await repository.getOrCreate('alice')).locale, 'vi');
-    } finally {
-      await connection.dropDatabase();
-      await app.close();
-    }
-    await assert.rejects(repository.getOrCreate('offline'), DatabaseError);
-  },
-);
-
-test(
   'repository features select the registered named connection without opening another pool',
   { timeout: 15000 },
   async () => {

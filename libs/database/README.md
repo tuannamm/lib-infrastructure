@@ -18,7 +18,7 @@ export class AppModule {}
 
 Ứng dụng nạp `.env` trước khi gọi `NestFactory.create` hoặc `createApplicationContext` (ví dụ `process.loadEnvFile()`); module đọc `process.env`, không tự tìm file `.env`. Thiếu hoặc sai `MONGODB_URI` khiến startup thất bại. Mỗi worker cấu hình URI của database mà nó sở hữu.
 
-Lib cung cấp sẵn contract, schema, repository và module persistence cho user profile. Collection mới dùng entity/repository và `DatabaseModule.forFeature` như bên dưới. Khi cần API Mongoose trực tiếp, vẫn có thể dùng `MongooseModule.forFeature(...)`, `@InjectModel(...)`, `@InjectConnection()` hoặc `getConnectionToken()` theo Nest/Mongoose chuẩn. Mỗi kết nối chỉ đăng ký một lần ở module gốc; feature module đăng ký model và dùng lại pool.
+Lib chỉ chứa kết nối MongoDB, decorator entity/field, base repository CRUD và cơ chế đăng ký provider. Mỗi worker sở hữu entity, tên collection, repository cụ thể, contract nghiệp vụ và khai báo `DatabaseModule.forFeature(...)` của nó. `forFeature` đăng ký model/collection trên connection có sẵn, dùng chung pool.
 
 ## Entity và repository có sẵn CRUD
 
@@ -97,42 +97,13 @@ DatabaseModule.forFeature([AuditRepository], { connectionName: 'audit' });
 
 Tất cả repository của `audit` dùng chung pool `audit`. Mỗi named connection được đăng ký tường minh là một pool riêng; `forFeature` không tạo thêm pool.
 
-## User profile persistence
+## Áp dụng trong worker
 
-Toàn bộ phần lưu trữ profile đã chuyển từ `w-identity` vào lib: `ProfilePatch`, `UserProfile`, `UserProfileRepositoryPort`, `ProfileRecord`, `ProfileSchema`, `MongooseUserProfileRepository`, token `PROFILE_REPOSITORY` và provider khởi tạo model.
+Ví dụ thực tế nằm trong `apps/w-identity`: `UserPersistenceEntity` khai báo collection `user_profiles`, `UserRepository` kế thừa base repository, và `AppModule` đăng ký `DatabaseModule.forFeature([UserRepository])`.
 
-```ts
-import { Inject, Injectable, Module } from '@nestjs/common';
-import {
-  DatabaseModule,
-  UserProfilePersistenceModule,
-  PROFILE_REPOSITORY,
-} from '@lib-infrastructure/database';
-import type { UserProfileRepositoryPort } from '@lib-infrastructure/database/contracts';
+`UserProfile` và `ProfilePatch` thuộc worker. `UserRepository` kế thừa CRUD, bổ sung getOrCreate/update cho profile. Use case dùng trực tiếp kiểu UserRepository, bootstrap inject class này; không có interface port hay token alias riêng cho repository. Lib không chứa collection hoặc entity nghiệp vụ và không import ngược worker.
 
-@Injectable()
-class ProfilesService {
-  constructor(
-    @Inject(PROFILE_REPOSITORY) private readonly profiles: UserProfileRepositoryPort,
-  ) {}
-
-  get(userId: string) {
-    return this.profiles.getOrCreate(userId);
-  }
-}
-
-@Module({
-  imports: [DatabaseModule, UserProfilePersistenceModule],
-  providers: [ProfilesService],
-})
-export class AppModule {}
-```
-
-`UserProfilePersistenceModule` dùng `DatabaseModule.forFeature([MongooseUserProfileRepository])`, với `ProfileEntity` có decorator và repository kế thừa CRUD chung. Nó dùng kết nối mặc định đã đăng ký và chuẩn bị model/index khi module khởi tạo. Module này được import riêng để các worker không dùng profile không tự đăng ký collection profile. Giữ nguyên collection `user_profiles`, unique index trên `keycloakUserId`, cập nhật bằng upsert và kết quả public không có `_id`.
-
-Entrypoint `@lib-infrastructure/database/contracts` chỉ chứa interface, dùng với `import type` trong tầng application. Lib không import ngược code của worker.
-
-Repository ném `DatabaseError` với code `DEPENDENCY_UNAVAILABLE` và thông báo an toàn khi storage lỗi. Worker ánh xạ lỗi này sang contract transport của nó; `w-identity` giữ response 503 hiện tại. Cấu hình/validation `MONGODB_URI` do `DatabaseModule` quản lý, không còn trong `IdentityConfig`.
+Lỗi storage chung dùng `DatabaseError`; worker ánh xạ lỗi sang contract transport của nó. Validation `MONGODB_URI` vẫn do `DatabaseModule` quản lý.
 
 ## Ghi đè cấu hình và nhiều kết nối
 
@@ -189,7 +160,7 @@ Startup chờ kết nối thành công, hết số lần thử thì báo lỗi. 
 
 Bật `app.enableShutdownHooks()` trong bootstrap và gọi `app.close()` khi chủ động dừng ứng dụng. Nest/Mongoose đóng pool; module giải phóng cả connection của các lần startup thất bại. Ứng dụng vẫn chịu trách nhiệm dừng listener và hoàn tất công việc đang chạy.
 
-`autoIndex` mặc định tắt: worker cần bảo đảm index được tạo trước khi nhận việc, hoặc bật có chủ đích ở cấu hình kết nối/schema. `ProfileSchema` trong lib giữ `autoIndex: true` và chờ `model.init()` để giữ hành vi index hiện tại.
+`autoIndex` mặc định tắt: worker cần bảo đảm index được tạo trước khi nhận việc, hoặc bật có chủ đích ở cấu hình kết nối/schema. `UserPersistenceEntity` trong `w-identity` giữ `autoIndex: true` và chờ `model.init()` để giữ hành vi index hiện tại.
 
 ## Readiness
 

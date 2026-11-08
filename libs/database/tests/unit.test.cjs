@@ -5,7 +5,6 @@ const { EventEmitter } = require('node:events');
 const { resolveDatabaseOptions } = require('../dist/lib/options');
 const { configureConnection } = require('../dist/lib/database.module');
 const { DatabaseModule, createDatabaseIndicator } = require('../dist');
-const { MongooseUserProfileRepository, DatabaseError } = require('../dist');
 const { Entity, Field, MongoDBRepository } = require('../dist');
 const { getEntityDefinition } = require('../dist/lib/entity');
 
@@ -66,47 +65,6 @@ test('different entity definitions cannot silently overwrite the same collection
   const foreignModel = new FirstRepository({ db: {} });
   foreignModel.connection = connection;
   await assert.rejects(foreignModel.onModuleInit(), /shared connection/);
-});
-
-test('profile repository retries duplicate-key races and maps storage errors safely', async () => {
-  const calls = [];
-  const record = {
-    keycloakUserId: 'alice',
-    locale: 'vi',
-    _id: 'internal',
-    createdAt: new Date('2026-01-01'),
-    updatedAt: new Date('2026-01-02'),
-  };
-  const repository = new MongooseUserProfileRepository({
-    findOneAndUpdate(...args) {
-      calls.push(args);
-      return {
-        lean: () => ({
-          exec: async () => {
-            if (calls.length === 1) throw { code: 11000 };
-            return record;
-          },
-        }),
-      };
-    },
-  });
-  const profile = await repository.update('alice', { locale: 'vi' });
-  assert.equal(profile.userId, 'alice');
-  assert.equal(profile.createdAt, '2026-01-01T00:00:00.000Z');
-  assert.equal('_id' in profile, false);
-  assert.equal(calls[0][2].upsert, true);
-  assert.equal(calls[1][2].upsert, undefined);
-  const unavailable = new MongooseUserProfileRepository({
-    findOneAndUpdate() {
-      throw new Error('mongodb://private:secret@host');
-    },
-  });
-  await assert.rejects(unavailable.getOrCreate('alice'), (error) => {
-    assert.ok(error instanceof DatabaseError);
-    assert.equal(error.code, 'DEPENDENCY_UNAVAILABLE');
-    assert.doesNotMatch(error.stack, /private|secret/);
-    return true;
-  });
 });
 
 test('defaults, overrides and validation without exposing configuration values', () => {
