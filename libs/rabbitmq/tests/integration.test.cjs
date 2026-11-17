@@ -254,3 +254,193 @@ test(
     assert.ok(Date.now() - started < 2000);
   },
 );
+
+test(
+  'topic events, per-queue bounded attempts, custom DLQ and unchanged RPC',
+  { timeout: 45000 },
+  async () => {
+    const tag = `exchange-test-${randomUUID()}`;
+    const exchange = `${tag}.events`;
+    const dlx = `${tag}.errors`;
+    const attempts = new Map();
+    let rpcFailures = 0;
+    const applications = [];
+    const queues = [];
+    let connection, channel, legacy;
+    const makeEvent = (data = {}) => ({
+      id: randomUUID(),
+      type: 'task',
+      action: 'assigned',
+      source: 'w-task',
+      occurredAt: new Date().toISOString(),
+      correlationId: randomUUID(),
+      data,
+    });
+    async function worker(name, eventHandler, retryCount) {
+      const queue = `${tag}.${name}`;
+      queues.push(queue);
+      class Handlers {
+        assigned(event) {
+          const key = `${name}:${event.id}`;
+          const count = (attempts.get(key) ?? 0) + 1;
+          attempts.set(key, count);
+          if (
+            name !== 'b' &&
+            (event.data.alwaysFail || count <= (event.data.failUntil ?? 0))
+          ) {
+            throw new RpcException('expected-event-failure');
+          }
+        }
+        echo(data) {
+          return { value: data.value };
+        }
+        fail() {
+          rpcFailures++;
+          throw new RpcException({ code: 'RPC_FAILURE' });
+        }
+      }
+      Controller()(Handlers);
+      if (eventHandler)
+        EventPattern('task.assigned')(
+          Handlers.prototype,
+          'assigned',
+          Object.getOwnPropertyDescriptor(Handlers.prototype, 'assigned'),
+        );
+      MessagePattern('rpc.echo')(
+        Handlers.prototype,
+        'echo',
+        Object.getOwnPropertyDescriptor(Handlers.prototype, 'echo'),
+      );
+      MessagePattern('rpc.fail')(
+        Handlers.prototype,
+        'fail',
+        Object.getOwnPropertyDescriptor(Handlers.prototype, 'fail'),
+      );
+      class App {}
+      Module({
+        imports: [
+          RabbitMQModule.forRoot({
+            uri,
+            queue,
+            exchange,
+            dlx,
+            dlq: `${queue}.errors`,
+            ...(retryCount === undefined ? {} : { retryCount }),
+            startupTimeoutMs: 5000,
+            timeoutMs: 2000,
+          }),
+        ],
+        controllers: [Handlers],
+      })(App);
+      const app = await NestFactory.create(App, {
+        logger: false,
+        abortOnError: false,
+      });
+      applications.push(app);
+      await app.init();
+      await startRabbitMQ(app);
+      return app.get(RabbitMQService);
+    }
+    try {
+      connection = await amqp.connect(uri);
+      channel = await connection.createChannel();
+      connection.on('error', () => {});
+      channel.on('error', () => {});
+      const a = await worker('a', true, 3);
+      await worker('b', true, 3);
+      await worker('rpc-only', false, 3);
+      const defaultRetry = await worker('default', true);
+
+      const failed = makeEvent({ alwaysFail: true });
+      await a.publishEvent(failed);
+      const failedA = await until(() =>
+        channel.get(`${queues[0]}.errors`, { noAck: true }),
+      );
+      const failedDefault = await until(() =>
+        channel.get(`${queues[3]}.errors`, { noAck: true }),
+      );
+      assert.equal(attempts.get(`a:${failed.id}`), 3);
+      assert.equal(attempts.get(`b:${failed.id}`), 1);
+      assert.equal(attempts.get(`default:${failed.id}`), 1);
+      assert.deepEqual(JSON.parse(failedA.content).data, failed);
+      assert.equal(failedA.properties.headers['x-retry-count'], 2);
+      assert.equal(failedA.properties.headers['x-origin-queue'], queues[0]);
+      assert.equal(failedDefault.properties.headers['x-retry-count'], 0);
+      assert.equal((await channel.checkQueue(queues[2])).messageCount, 0);
+      assert.equal(
+        await channel.get(`${queues[1]}.errors`, { noAck: true }),
+        false,
+      );
+
+      const recovered = makeEvent({ failUntil: 1 });
+      await a.publishEvent(recovered);
+      await until(() => attempts.get(`a:${recovered.id}`) === 2);
+      await until(() => attempts.get(`b:${recovered.id}`) === 1);
+      assert.equal(
+        await channel.get(`${queues[0]}.errors`, { noAck: true }),
+        false,
+      );
+
+      // Caller with old URI/queue-only config must not redeclare custom target arguments.
+      legacy = new RabbitMQService(
+        require('../dist/lib/options').resolveRabbitMQOptions({
+          uri,
+          queue: `${tag}.legacy`,
+          timeoutMs: 2000,
+        }),
+      );
+      assert.deepEqual(
+        await legacy.send(queues[0], 'rpc.echo', { value: 'legacy-to-custom' }),
+        { value: 'legacy-to-custom' },
+      );
+      assert.deepEqual(
+        await a.send(queues[1], 'rpc.echo', { value: 'custom-to-custom' }),
+        { value: 'custom-to-custom' },
+      );
+      await assert.rejects(
+        legacy.send(queues[0], 'rpc.fail', {}),
+        (error) => error.code === 'RPC_FAILURE',
+      );
+      const rpcError = await until(() =>
+        channel.get(`${queues[0]}.errors`, { noAck: true }),
+      );
+      assert.equal(JSON.parse(rpcError.content).pattern, 'rpc.fail');
+      assert.equal(rpcFailures, 1); // retryCount=3 must not retry RPC.
+
+      // RPC-only handlers are not topic subscriptions, and mandatory returns surface.
+      await assert.rejects(
+        a.publishEvent({ ...makeEvent(), type: 'rpc', action: 'echo' }),
+        /matching queue/,
+      );
+
+      const afterReturn = makeEvent();
+      await a.publishEvent(afterReturn);
+      await until(() => attempts.get(`b:${afterReturn.id}`) === 1);
+
+      // Raw wire messages on the topic exchange are validated before dispatch.
+      channel.publish(exchange, 'task.assigned', Buffer.from('malformed json'));
+      const malformed = await until(() =>
+        channel.get(`${queues[0]}.errors`, { noAck: true }),
+      );
+      assert.equal(malformed.content.toString(), 'malformed json');
+      assert.equal(
+        malformed.properties.headers['x-failure-reason'],
+        'invalid-event',
+      );
+      assert.equal(defaultRetry.options.retryCount, 0);
+    } finally {
+      await legacy?.onApplicationShutdown();
+      for (const app of applications.reverse()) await app.close();
+      if (channel) {
+        for (const queue of queues) {
+          await channel.deleteQueue(queue);
+          await channel.deleteQueue(`${queue}.errors`);
+        }
+        await channel.deleteExchange(exchange);
+        await channel.deleteExchange(dlx);
+        await channel.close();
+      }
+      await connection?.close();
+    }
+  },
+);

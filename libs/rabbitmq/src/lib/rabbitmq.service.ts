@@ -11,6 +11,8 @@ import {
   validateQueue,
   type ResolvedRabbitMQOptions,
 } from './options';
+import { EventPublisher } from './event-publisher';
+import { eventRoutingKey, EVENT_HEADER, type RmqEvent } from './event';
 import { RabbitMQClient } from './client';
 import { RabbitMQServer } from './server';
 
@@ -21,11 +23,13 @@ export class RabbitMQService
   readonly server: RabbitMQServer;
   private readonly clients = new Map<string, RabbitMQClient>();
   private stopped = false;
+  private readonly eventPublisher: EventPublisher;
 
   constructor(
     @Inject(RABBITMQ_OPTIONS) readonly options: ResolvedRabbitMQOptions,
   ) {
-    this.server = new RabbitMQServer(options);
+    this.eventPublisher = new EventPublisher(options);
+    this.server = new RabbitMQServer(options, this.eventPublisher);
   }
 
   get isReady(): boolean {
@@ -41,6 +45,25 @@ export class RabbitMQService
       this.clients.set(queue, client);
     }
     return client;
+  }
+
+  /** Low-level exchange publishing; existing direct emit/send remain unchanged. */
+  async publishEvent(event: RmqEvent): Promise<void> {
+    if (this.stopped) throw new Error('RabbitMQ is shutting down');
+    if (!this.options.exchange)
+      throw new Error('RABBITMQ_EXCHANGE is required to publish events');
+    const pattern = eventRoutingKey(event);
+    await this.eventPublisher.publish(
+      this.options.exchange,
+      pattern,
+      Buffer.from(JSON.stringify({ pattern, data: event })),
+      {
+        contentType: 'application/json',
+        messageId: event.id,
+        correlationId: event.correlationId,
+        headers: { [EVENT_HEADER]: 1 },
+      },
+    );
   }
 
   async emit(queue: string, pattern: string, payload: unknown): Promise<void> {

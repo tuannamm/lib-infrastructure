@@ -189,3 +189,202 @@ test('drain returns at its deadline when a handler has not finished', async () =
   stream.complete();
   await pending;
 });
+
+const {
+  eventRoutingKey,
+  EVENT_HEADER,
+  RETRY_HEADER,
+} = require('../dist/lib/event');
+const event = () => ({
+  id: 'bb6b555e-67bd-4c18-8ee9-1747c1dc2d51',
+  type: 'task',
+  action: 'assigned',
+  source: 'w-task',
+  occurredAt: '2026-11-17T03:00:00.000Z',
+  correlationId: 'flow-123',
+  data: { taskId: 'task-456' },
+});
+
+test('exchange, custom DLX/DLQ, retry defaults/validation and standard vhosts', () => {
+  const env = {
+    RABBITMQ_URI: 'amqp://localhost/production',
+    RABBITMQ_QUEUE: 'worker',
+    RABBITMQ_EXCHANGE: 'pm.events',
+    RABBITMQ_DLX: 'pm.errors',
+    RABBITMQ_DLQ: 'worker.errors',
+    RABBITMQ_RETRY_COUNT: '3',
+  };
+  const options = resolveRabbitMQOptions({}, env);
+  assert.equal(options.uri, env.RABBITMQ_URI);
+  assert.equal(options.exchange, 'pm.events');
+  assert.equal(options.dlx, 'pm.errors');
+  assert.equal(options.dlq, 'worker.errors');
+  assert.equal(options.retryCount, 3);
+  assert.equal(config().retryCount, 0);
+  assert.equal(config().dlx, 'unit-test.dlx');
+  for (const value of [
+    '',
+    '-1',
+    '1.5',
+    'NaN',
+    ' 3 ',
+    'Infinity',
+    '9007199254740992',
+  ]) {
+    assert.throws(
+      () => resolveRabbitMQOptions({}, { ...env, RABBITMQ_RETRY_COUNT: value }),
+      /RETRY_COUNT/,
+    );
+  }
+  assert.equal(resolveRabbitMQOptions({ retryCount: 0 }, env).retryCount, 0);
+  for (const options of [
+    { dlq: 'unit-test' },
+    { exchange: 'pm', dlx: 'pm' },
+    { dlx: 'amq.reserved' },
+  ]) {
+    assert.throws(() =>
+      resolveRabbitMQOptions({ ...config(), ...options }, {}),
+    );
+  }
+});
+
+test('validates business envelope and generates a deterministic routing key', () => {
+  assert.equal(eventRoutingKey(event()), 'task.assigned');
+  for (const invalid of [
+    null,
+    [],
+    {},
+    { ...event(), id: 'bad' },
+    { ...event(), type: 'task.*' },
+    { ...event(), action: 'task.assigned' },
+    { ...event(), occurredAt: 'yesterday' },
+    { ...event(), occurredAt: '2026-02-31T00:00:00.000Z' },
+    { ...event(), data: undefined },
+  ]) {
+    assert.throws(() => eventRoutingKey(invalid), /event/);
+  }
+});
+
+test('low-level exchange publishing preserves the Nest packet; direct APIs remain separate', async () => {
+  const service = new RabbitMQService({ ...config(), exchange: 'pm.events' });
+  const calls = [];
+  service.eventPublisher.publish = async (...args) => calls.push(args);
+  await service.publishEvent(event());
+  assert.equal(calls[0][0], 'pm.events');
+  assert.equal(calls[0][1], 'task.assigned');
+  assert.deepEqual(JSON.parse(calls[0][2]), {
+    pattern: 'task.assigned',
+    data: event(),
+  });
+  assert.equal(calls[0][3].headers[EVENT_HEADER], 1);
+  assert.equal(service.clients.size, 0);
+  await service.onApplicationShutdown();
+  await assert.rejects(service.publishEvent(event()), /shutting down/);
+});
+
+test('only exact event handlers create bindings, never RPC handlers', () => {
+  const server = new RabbitMQServer({ ...config(), exchange: 'pm.events' });
+  server.addHandler('user.find', async () => ({}), false);
+  server.addHandler('task.assigned', async () => undefined, true);
+  assert.deepEqual([...server.eventPatterns], ['task.assigned']);
+  assert.throws(
+    () => server.addHandler('task.*', async () => undefined, true),
+    /exact/,
+  );
+  assert.throws(
+    () => server.addHandler('task.assigned', async () => undefined, true),
+    /Duplicate/,
+  );
+});
+
+function eventFixture(retryCount, count = 0, publisher) {
+  const calls = [];
+  const server = new RabbitMQServer(
+    { ...config(), exchange: 'pm.events', retryCount },
+    publisher ?? {
+      publish: async (...args) => calls.push(['publish', ...args]),
+      close: async () => {},
+    },
+  );
+  const channel = {
+    ack: () => calls.push(['ack']),
+    nack: () => calls.push(['nack']),
+    close: async () => calls.push(['close']),
+  };
+  const message = {
+    content: Buffer.from(
+      JSON.stringify({ pattern: 'task.assigned', data: event() }),
+    ),
+    fields: { exchange: 'pm.events', routingKey: 'task.assigned' },
+    properties: { messageId: event().id, headers: {} },
+  };
+  server.events.set(message, { count, key: 'task.assigned' });
+  return {
+    calls,
+    server,
+    channel,
+    message,
+    context: new RmqContext([message, channel, 'task.assigned']),
+  };
+}
+
+test('retryCount=3 permits total three attempts; zero/one go straight to DLQ', async () => {
+  for (const [limit, count, expectedExchange] of [
+    [3, 0, ''],
+    [3, 1, ''],
+    [3, 2, 'unit-test.dlx'],
+    [0, 0, 'unit-test.dlx'],
+    [1, 0, 'unit-test.dlx'],
+  ]) {
+    const { server, context, calls, message } = eventFixture(limit, count);
+    await server.settle(context, false);
+    assert.equal(calls[0][0], 'publish');
+    assert.equal(calls[0][1], expectedExchange);
+    assert.equal(calls[0][2], 'unit-test');
+    assert.deepEqual(calls[0][3], message.content);
+    assert.equal(
+      calls[0][4].headers[RETRY_HEADER],
+      expectedExchange === '' ? count + 1 : count,
+    );
+    assert.deepEqual(calls[1], ['ack']);
+    await server.settle(context, false);
+    assert.equal(calls.length, 2);
+  }
+});
+
+test('settlement waits for publish; failure leaves original unacked and recovers channel', async () => {
+  let release;
+  const published = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { server, context, calls } = eventFixture(3, 0, {
+    publish: () => published,
+    close: async () => {},
+  });
+  const pending = server.settle(context, false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, []);
+  release();
+  await pending;
+  assert.deepEqual(calls, [['ack']]);
+
+  const failed = eventFixture(3, 0, {
+    publish: async () => {
+      throw new Error('unroutable');
+    },
+    close: async () => {},
+  });
+  await failed.server.settle(failed.context, false);
+  assert.deepEqual(failed.calls, [['close']]);
+  assert.equal(failed.server.settled.has(failed.message), false);
+});
+
+test('malformed exchange event is transferred to DLQ without retry', async () => {
+  const { server, channel, calls, message } = eventFixture(3);
+  message.content = Buffer.from('invalid json');
+  server.events.delete(message);
+  await server.handleMessage(message, channel);
+  assert.equal(calls[0][1], 'unit-test.dlx');
+  assert.equal(calls[0][4].headers['x-failure-reason'], 'invalid-event');
+  assert.deepEqual(calls[1], ['ack']);
+});

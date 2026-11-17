@@ -3,6 +3,10 @@ import type { InjectionToken, ModuleMetadata } from '@nestjs/common';
 export interface RabbitMQOptions {
   uri?: string;
   queue?: string;
+  exchange?: string;
+  dlx?: string;
+  dlq?: string;
+  retryCount?: number;
   prefetch?: number;
   startupTimeoutMs?: number;
   timeoutMs?: number;
@@ -52,9 +56,43 @@ export function resolveRabbitMQOptions(
     // Never include the URI: it can contain credentials.
     throw new Error('RABBITMQ_URI must be a valid amqp:// or amqps:// URI');
   }
+  const queue = validateQueue(options.queue ?? env.RABBITMQ_QUEUE ?? '');
+  const exchange = options.exchange ?? env.RABBITMQ_EXCHANGE ?? '';
+  const dlx = options.dlx ?? env.RABBITMQ_DLX ?? `${queue}.dlx`;
+  const dlq = options.dlq ?? env.RABBITMQ_DLQ ?? `${queue}.dlq`;
+  for (const [name, value] of Object.entries({ exchange, dlx, dlq })) {
+    if (name === 'exchange' && value === '') continue; // Legacy queue-only mode.
+    if (
+      typeof value !== 'string' ||
+      !value.trim() ||
+      value.startsWith('amq.') ||
+      Buffer.byteLength(value) > 255 ||
+      /[\x00-\x1f]/.test(value)
+    ) {
+      throw new Error(
+        `RabbitMQ ${name} must be a nonempty, non-reserved AMQP name`,
+      );
+    }
+  }
+  if (queue === dlq || exchange === dlx) {
+    throw new Error('RabbitMQ queue/DLQ and exchange/DLX must be distinct');
+  }
+  const retryValue = options.retryCount ?? env.RABBITMQ_RETRY_COUNT ?? 0;
+  if (
+    (typeof retryValue !== 'number' && typeof retryValue !== 'string') ||
+    (typeof retryValue === 'string' && !/^\d+$/.test(retryValue)) ||
+    !Number.isSafeInteger(Number(retryValue)) ||
+    Number(retryValue) < 0
+  ) {
+    throw new Error('RABBITMQ_RETRY_COUNT must be a nonnegative integer');
+  }
   return {
     uri: uri!,
-    queue: validateQueue(options.queue ?? env.RABBITMQ_QUEUE ?? ''),
+    queue,
+    exchange,
+    dlx,
+    dlq,
+    retryCount: Number(retryValue),
     prefetch: positiveInteger('prefetch', options.prefetch ?? 10),
     startupTimeoutMs: positiveInteger(
       'startupTimeoutMs',
